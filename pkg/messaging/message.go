@@ -106,7 +106,7 @@ func (m *message) Equals(other Message) bool {
 		return false
 	}
 
-	if !reflect.DeepEqual(m.Headers, other.Headers) {
+	if !reflect.DeepEqual(m.Headers(), other.Headers()) {
 		return false
 	}
 

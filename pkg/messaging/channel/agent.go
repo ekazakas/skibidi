@@ -3,8 +3,10 @@ package channel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/ekazakas/skibidi/pkg/log"
 	"github.com/ekazakas/skibidi/pkg/messaging"
+	"github.com/google/uuid"
 	"math/rand"
 	"sync"
 )
@@ -34,41 +36,50 @@ type (
 	//
 	// When Agent is persistent, messages order is not guaranteed.
 	Agent struct {
-		config Config
-		logger log.Adapter
-
-		//subscribersWg          sync.WaitGroup
-		subscribersLock        sync.RWMutex
-		subscribers            map[string][]*subscriber
-		subscribersByTopicLock sync.Map
-		closedLock             sync.Mutex
-		closed                 bool
-		closing                chan struct{}
-		persistedMessagesLock  sync.RWMutex
-		persistedMessages      map[string][]messaging.Message
+		config                Config
+		logger                log.Adapter
+		subscribersLock       sync.RWMutex
+		subscribers           map[string][]*subscriber
+		closedLock            sync.Mutex
+		closed                bool
+		closing               chan struct{}
+		persistedMessagesLock sync.RWMutex
+		persistedMessages     map[string][]messaging.Message
 	}
 )
+
+func (c *Config) validate() error {
+	if c.Size < 0 {
+		return fmt.Errorf("invalid size: %d", c.Size)
+	}
+
+	return nil
+}
 
 // NewAgent creates new Agent Pub/Sub.
 //
 // This Agent is not persistent.
 // That means if you send a message to a topic to which no subscriber is subscribed, that message will be discarded.
-func NewAgent(config Config, logger log.Adapter) *Agent {
+func NewAgent(config Config) (*Agent, error) {
+	return NewAgentWithLogger(config, log.NoopAdapter{})
+}
+
+func NewAgentWithLogger(config Config, logger log.Adapter) (*Agent, error) {
+	if err := config.validate(); err != nil {
+		return nil, err
+	}
+
 	if logger == nil {
-		logger = log.NoopAdapter{}
+		return nil, errors.New("logger must not be nil")
 	}
 
 	return &Agent{
-		config: config,
-
-		subscribers: make(map[string][]*subscriber),
-		//subscribersByTopicLock: sync.Map{},
-		logger: logger.With(log.Fields{
-			"agent_id": rand.Uint64(),
-		}),
+		config:            config,
+		logger:            logger.With(log.Fields{"agent_id": uuid.New().String()}),
+		subscribers:       make(map[string][]*subscriber),
 		closing:           make(chan struct{}),
 		persistedMessages: map[string][]messaging.Message{},
-	}
+	}, nil
 }
 
 // Publish in Agent is NOT bLocking until all consumers consume.
@@ -80,18 +91,6 @@ func (c *Agent) Publish(topic string, messages ...messaging.Message) error {
 		return errors.New("channel is closed")
 	}
 
-	//publishMessages := make([]messaging.Message, len(messages))
-	//for i, msg := range messages {
-	//	publishMessages[i] = messaging.NewMessage(msg.Headers(), msg.Body())
-	//}
-
-	//c.subscribersLock.RLock()
-	//defer c.subscribersLock.RUnlock()
-	//
-	//subLock, _ := c.subscribersByTopicLock.LoadOrStore(topic, &sync.Mutex{})
-	//subLock.(*sync.Mutex).Lock()
-	//defer subLock.(*sync.Mutex).Unlock()
-	//
 	if c.config.Persistent {
 		c.persistMessages(topic, messages)
 	}
@@ -119,12 +118,12 @@ func (c *Agent) Publish(topic string, messages ...messaging.Message) error {
 //
 // There are no consumer groups support etc. Every consumer will receive every produced message.
 func (c *Agent) Subscribe(ctx context.Context, topic string) (<-chan messaging.Message, error) {
-	//c.closedLock.Lock()
-	//
-	//if c.closed {
-	//	c.closedLock.Unlock()
-	//	return nil, errors.New("Pub/Sub closed")
-	//}
+	c.closedLock.Lock()
+	defer c.closedLock.Unlock()
+
+	if c.closed {
+		return nil, errors.New("agent closed")
+	}
 	//
 	//c.subscribersWc.Add(1)
 	//c.closedLock.Unlock()
@@ -134,87 +133,44 @@ func (c *Agent) Subscribe(ctx context.Context, topic string) (<-chan messaging.M
 	//subLock, _ := c.subscribersByTopicLock.LoadOrStore(topic, &sync.Mutex{})
 	//subLock.(*sync.Mutex).Lock()
 	//
-	//s := &subscriber{
-	//	ctx:           ctx,
-	//	uuid:          watermill.NewUUID(),
-	//	outputAgent: make(chan messaging.Message, c.config.OutputAgentBuffer),
-	//	logger:        c.logger,
-	//	closing:       make(chan struct{}),
-	//}
+	sub := &subscriber{
+		ctx:    ctx,
+		output: make(chan messaging.Message, c.config.Size),
+		logger: c.logger.With(log.Fields{
+			"subscriber_id": rand.Uint64(),
+		}),
+		closing: make(chan struct{}),
+	}
 
-	//go func(s *subscriber, c *Agent) {
-	//	select {
-	//	case <-ctx.Done():
-	//		// unbLock
-	//	case <-c.closing:
-	//		// unbLock
-	//	}
-	//
-	//	s.Close()
-	//
-	//	c.subscribersLock.Lock()
-	//	defer c.subscribersLock.Unlock()
-	//
-	//	subLock, _ := c.subscribersByTopicLock.Load(topic)
-	//	subLock.(*sync.Mutex).Lock()
-	//	defer subLock.(*sync.Mutex).Unlock()
-	//
-	//	c.removeSubscriber(topic, s)
-	//	c.subscribersWc.Done()
-	//}(s, g)
+	go func(s *subscriber, c *Agent) {
+		select {
+		case <-ctx.Done():
+		case <-c.closing:
+		}
 
-	//if !c.config.Persistent {
-	//	defer c.subscribersLock.Unlock()
-	//	defer subLock.(*sync.Mutex).Unlock()
-	//
-	//	c.addSubscriber(topic, s)
-	//
-	//	return s.outputAgent, nil
-	//}
+		s.Close()
+	}(sub, c)
 
-	//go func(s *subscriber) {
-	//	defer c.subscribersLock.Unlock()
-	//	defer subLock.(*sync.Mutex).Unlock()
-	//
-	//	c.persistedMessagesLock.RLock()
-	//	messages, ok := c.persistedMessages[topic]
-	//	c.persistedMessagesLock.RUnlock()
-	//
-	//	if ok {
-	//		for i := range messages {
-	//			msg := c.persistedMessages[topic][i]
-	//			logFields := log.Fields{"message_uuid": msg.UUID, "topic": topic}
-	//
-	//			go s.sendMessageToSubscriber(msg, logFields)
-	//		}
-	//	}
-	//
-	//	c.addSubscriber(topic, s)
-	//}(s)
+	if !c.config.Persistent {
+		c.addSubscriber(topic, sub)
 
-	//return s.outputAgent, nil
+		return sub.output, nil
+	}
+
+	go func(s *subscriber) {
+		if messages := c.fetchMessages(topic); len(messages) > 0 {
+			for _, message := range messages {
+				go s.Send(message, log.Fields{
+					"topic": topic,
+				})
+			}
+		}
+
+		c.addSubscriber(topic, s)
+	}(sub)
+
+	return sub.output, nil
 }
-
-//func (c *Agent) addSubscriber(topic string, s *subscriber) {
-//	if _, ok := c.subscribers[topic]; !ok {
-//		c.subscribers[topic] = make([]*subscriber, 0)
-//	}
-//	c.subscribers[topic] = append(c.subscribers[topic], s)
-//}
-
-//func (c *Agent) removeSubscriber(topic string, toRemove *subscriber) {
-//	removed := false
-//	for i, sub := range c.subscribers[topic] {
-//		if sub == toRemove {
-//			c.subscribers[topic] = append(c.subscribers[topic][:i], c.subscribers[topic][i+1:]...)
-//			removed = true
-//			break
-//		}
-//	}
-//	if !removed {
-//		panic("cannot remove subscriber, not found " + toRemove.uuid)
-//	}
-//}
 
 // Close closes the Agent.
 func (c *Agent) Close() error {
@@ -227,12 +183,6 @@ func (c *Agent) Close() error {
 
 	c.closed = true
 	close(c.closing)
-
-	//c.logger.Debug("Closing Pub/Sub, waiting for subscribers", nil)
-	//c.subscribersWc.Wait()
-	//
-	//c.logger.Info("Pub/Sub closed", nil)
-	//c.persistedMessages = nil
 
 	return nil
 }
@@ -248,11 +198,33 @@ func (c *Agent) persistMessages(topic string, messages []messaging.Message) {
 	c.persistedMessages[topic] = append(c.persistedMessages[topic], messages...)
 }
 
+func (c *Agent) fetchMessages(topic string) []messaging.Message {
+	c.persistedMessagesLock.RLock()
+	defer c.persistedMessagesLock.RUnlock()
+
+	if messages, ok := c.persistedMessages[topic]; ok {
+		return messages
+	}
+
+	return nil
+}
+
 func (c *Agent) isClosed() bool {
 	c.closedLock.Lock()
 	defer c.closedLock.Unlock()
 
 	return c.closed
+}
+
+func (c *Agent) addSubscriber(topic string, sub *subscriber) {
+	c.subscribersLock.Lock()
+	defer c.subscribersLock.Unlock()
+
+	if _, ok := c.subscribers[topic]; !ok {
+		c.subscribers[topic] = make([]*subscriber, 0)
+	}
+
+	c.subscribers[topic] = append(c.subscribers[topic], sub)
 }
 
 func (c *Agent) topicSubscribers(topic string) []*subscriber {

@@ -10,7 +10,6 @@ import (
 type (
 	subscriber struct {
 		ctx     context.Context
-		id      string
 		sending sync.Mutex
 		output  chan messaging.Message
 		logger  log.Adapter
